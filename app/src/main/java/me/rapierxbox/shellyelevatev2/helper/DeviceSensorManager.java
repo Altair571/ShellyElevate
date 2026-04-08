@@ -42,10 +42,11 @@ public class DeviceSensorManager implements SensorEventListener {
     private float lastPublishedProximity = -1f;
     private long lastProximityBroadcastAtMs = 0L;
     private static final long MIN_PROX_EVENT_INTERVAL_MS = 500L; // doubled interval
-    private static final float PROX_ABS_THRESHOLD = 0.2f; // increased threshold
     private long lastInvalidProximityLogAtMs = 0L;
 
     private final Context context;
+    private final boolean lightSensorAvailable;
+    private final boolean proximitySensorAvailable;
 
     public DeviceSensorManager(Context ctx) {
         context = ctx;
@@ -60,18 +61,24 @@ public class DeviceSensorManager implements SensorEventListener {
 
         // light sensor
         Sensor lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
-        sensorManager.registerListener(this, lightSensor, SensorManager.SENSOR_DELAY_NORMAL);
+        lightSensorAvailable = lightSensor != null;
+        if (lightSensorAvailable) {
+            sensorManager.registerListener(this, lightSensor, SensorManager.SENSOR_DELAY_NORMAL);
+        }
 
         // proximity sensor
         Log.d(TAG, "Has proximity sensor: " + device.hasProximitySensor);
+        boolean proxAvailable = false;
         if (device.hasProximitySensor) {
             Sensor proximitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
             if (proximitySensor != null) {
                 maxProximitySensorValue = proximitySensor.getMaximumRange();
                 Log.d(TAG, "Default proximity sensor: " + proximitySensor + " - Max: " + maxProximitySensorValue);
                 sensorManager.registerListener(this, proximitySensor, SensorManager.SENSOR_DELAY_NORMAL);
+                proxAvailable = true;
             }
         }
+        proximitySensorAvailable = proxAvailable;
     }
 
     public float getLastMeasuredLux() {
@@ -81,8 +88,19 @@ public class DeviceSensorManager implements SensorEventListener {
     private float lastMeasuredDistance = 0.0f;
     public float getLastMeasuredDistance() { return lastMeasuredDistance; }
 
+    private float lastRawProximity = 0.0f;
+    public float getLastRawProximity() { return lastRawProximity; }
+
     private float maxProximitySensorValue = 1.0f;
     public float getMaxProximitySensorValue() { return maxProximitySensorValue;}
+
+    public boolean isLightSensorAvailable() {
+        return lightSensorAvailable;
+    }
+
+    public boolean isProximitySensorAvailable() {
+        return proximitySensorAvailable;
+    }
 
     @Override
     public void onSensorChanged(SensorEvent event) {
@@ -125,13 +143,16 @@ public class DeviceSensorManager implements SensorEventListener {
 
             case Sensor.TYPE_PROXIMITY:
                 float rawProximity = event.values[0];
+                lastRawProximity = rawProximity;
                 lastMeasuredDistance = normalizeProximityValue(rawProximity);
                 boolean first = lastPublishedProximity < 0f;
-                float delta = Math.abs(lastMeasuredDistance - (first ? lastMeasuredDistance : lastPublishedProximity));
                 long nowProx = SystemClock.elapsedRealtime();
                 boolean intervalOkProx = nowProx - lastProximityBroadcastAtMs >= MIN_PROX_EVENT_INTERVAL_MS;
 
-                if (first || (delta >= PROX_ABS_THRESHOLD && intervalOkProx)) {
+                // Keep sending periodic proximity updates even when value is unchanged.
+                // Some firmwares keep proximity fixed at 0 while near, and screensaver wake
+                // logic relies on receiving updates after the saver has already started.
+                if (first || intervalOkProx) {
                     intent = new Intent(INTENT_PROXIMITY_UPDATED);
                     intent.putExtra(INTENT_PROXIMITY_KEY, lastMeasuredDistance);
                     LocalBroadcastManager.getInstance(context).sendBroadcast(intent);
