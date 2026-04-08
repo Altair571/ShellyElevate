@@ -17,9 +17,9 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.os.SystemClock;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
@@ -43,6 +43,7 @@ public class DeviceSensorManager implements SensorEventListener {
     private long lastProximityBroadcastAtMs = 0L;
     private static final long MIN_PROX_EVENT_INTERVAL_MS = 500L; // doubled interval
     private static final float PROX_ABS_THRESHOLD = 0.2f; // increased threshold
+    private long lastInvalidProximityLogAtMs = 0L;
 
     private final Context context;
 
@@ -66,7 +67,7 @@ public class DeviceSensorManager implements SensorEventListener {
         if (device.hasProximitySensor) {
             Sensor proximitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
             if (proximitySensor != null) {
-                maxProximitySensorValue = proximitySensor.getMaximumRange();
+                maxProximitySensorValue = sanitizeMaxProximityValue(proximitySensor.getMaximumRange());
                 Log.d(TAG, "Default proximity sensor: " + proximitySensor + " - Max: " + maxProximitySensorValue);
                 sensorManager.registerListener(this, proximitySensor, SensorManager.SENSOR_DELAY_NORMAL);
             }
@@ -123,7 +124,8 @@ public class DeviceSensorManager implements SensorEventListener {
                 break;
 
             case Sensor.TYPE_PROXIMITY:
-                lastMeasuredDistance = event.values[0];
+                float rawProximity = event.values[0];
+                lastMeasuredDistance = normalizeProximityValue(rawProximity);
                 boolean first = lastPublishedProximity < 0f;
                 float delta = Math.abs(lastMeasuredDistance - (first ? lastMeasuredDistance : lastPublishedProximity));
                 long nowProx = SystemClock.elapsedRealtime();
@@ -138,6 +140,39 @@ public class DeviceSensorManager implements SensorEventListener {
                 }
                 break;
         }
+    }
+
+    private float normalizeProximityValue(float rawProximity) {
+        float safeMaxProximity = sanitizeMaxProximityValue(maxProximitySensorValue);
+
+        if (Float.isNaN(rawProximity) || Float.isInfinite(rawProximity)) {
+            return safeMaxProximity;
+        }
+
+        if (rawProximity < 0f) {
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastInvalidProximityLogAtMs > 5000L) {
+                Log.w(TAG, "Invalid proximity value from HAL: " + rawProximity + ", treating as FAR");
+                lastInvalidProximityLogAtMs = now;
+            }
+            return safeMaxProximity;
+        }
+
+        // Some Smatek/Shelly firmwares expose binary proximity (0/1)
+        if (safeMaxProximity <= 1.5f) {
+            return rawProximity <= 0.5f ? 0f : 1f;
+        }
+
+        // Distance-mode sensor: clamp noisy out-of-range values
+        if (rawProximity > safeMaxProximity) {
+            return safeMaxProximity;
+        }
+
+        return rawProximity;
+    }
+
+    private float sanitizeMaxProximityValue(float sensorMaxValue) {
+        return sensorMaxValue > 0f ? sensorMaxValue : 1f;
     }
 
     @Override
